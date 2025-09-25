@@ -31,22 +31,28 @@ end
 Deduction reduce the problem by using the deduction rule.
 """
 function deduction_reduce(p::BooleanInferenceProblem, bs::AbstractBranchingStatus, reducing_queue::Vector{Int})
-	while !isempty(reducing_queue)
-		isempty(reducing_queue) && break
-		# take the first edge from the reducing_queue
-		edge_idx = popfirst!(reducing_queue)
-		# if the edge is already satisfied, skip
-		(bs.undecided_literals[edge_idx] <= 0) && continue
-		# check if the edge can be reduced
-		zerocount, sumpos = check_reduce(p.he2v[edge_idx], bs.decided_mask, bs.config, p.tensors[edge_idx])
-		# only have one way to make the edge satisfiable
-		(zerocount == 1) || continue
-		# using this unique way to make the edge satisfiable
-		bs, aedges = decide_literal(bs, p, p.he2v[edge_idx], Clause(2^length(p.he2v[edge_idx]) - 1, sumpos - 1))
-		# add the edges that have been changed to the reducing_queue again
-		reducing_queue = reducing_queue ∪ aedges
-	end
-	return bs
+	head = 1
+	while head <= length(reducing_queue)
+        edge_idx = reducing_queue[head]
+        head += 1
+
+        (bs.undecided_literals[edge_idx] <= 0) && continue
+
+        zerocount, sumpos = check_reduce(p.he2v[edge_idx],
+                                         bs.decided_mask,
+                                         bs.config,
+                                         p.tensors[edge_idx])
+
+        (zerocount == 1) || continue
+
+        bs, aedges = decide_literal(bs, p, p.he2v[edge_idx],
+                                    Clause(2^length(p.he2v[edge_idx]) - 1,
+                                           sumpos - 1))
+
+        append!(reducing_queue, aedges)
+    end
+
+    return bs
 end
 
 function check_reduce(he2vi, mask, config, tensor)
@@ -83,7 +89,8 @@ end
 function decide_literal(bs::AbstractBranchingStatus{C}, p::BooleanInferenceProblem, vertices::Vector{Int}, clause::Clause{N}) where {N,C}
 	config = copy(bs.config)  # The value of variables 
 
-	dls = Int[]
+	dls = Int[]  # the undecided literals in the clause
+	sizehint!(dls, length(vertices))
 	for (k, v) in enumerate(vertices)  # enumerate the vertices in the clause
 		if readbit(clause.mask, k) == 1 && (readbit(bs.decided_mask, v) == 0)
 			push!(dls, v)  # the undecided literals in the clause
@@ -96,8 +103,18 @@ function decide_literal(bs::AbstractBranchingStatus{C}, p::BooleanInferenceProbl
 	mask = bs.decided_mask | indices_to_mask(dls, typeof(config))
 	undecided_literals = copy(bs.undecided_literals)
 	aedges = Int[]  # edges that have been changed
+	sizehint!(aedges, length(dls) * 2)  # rough estimate
+	
 	# get the union of edges that contain the undecided literals
-	for edge_num in mapreduce(v -> p.v2he[v], ∪, dls)
+	edge_mask = falses(length(p.he2v))
+	mark!(e) = (edge_mask[e] || (edge_mask[e] = true))
+	@inbounds for v in dls
+		for e in p.v2he[v]
+			mark!(e)
+		end
+	end
+	edge_num = findfirst(edge_mask)
+	while !isnothing(edge_num)
 		# if the edge is not fully decided
 		if bs.undecided_literals[edge_num] > 0
 			# In each edge, how many variables are newly decided
@@ -113,6 +130,7 @@ function decide_literal(bs::AbstractBranchingStatus{C}, p::BooleanInferenceProbl
 				push!(aedges, edge_num)
 			end
 		end
+		edge_num = findnext(edge_mask, edge_num + 1)
 	end
 	return BranchingStatus(config, mask, undecided_literals), aedges
 end

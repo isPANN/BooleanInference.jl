@@ -15,12 +15,12 @@ Details:
 
 Returns a vector of 0/1 integers representing the optimal assignment.
 """
-function findmin(problem::AbstractProblem,tag::Bool; optimizer, env)
+function findmin(problem::AbstractProblem, tag::Bool; optimizer, env)
     # Extract circuit constraints and sizing info
     cons = constraints(problem)
     nsc = ProblemReductions.num_variables(problem)
     maxN = maximum([length(c.variables) for c in cons])
-    combs = [ProblemReductions.combinations(2,i) for i in 1:maxN]
+    combs = [ProblemReductions.combinations(2, i) for i in 1:maxN]
 
     objs = objectives(problem)
 
@@ -31,15 +31,15 @@ function findmin(problem::AbstractProblem,tag::Bool; optimizer, env)
     set_string_names_on_creation(model, false)
 
     # Binary assignment variables for each SAT variable
-    JuMP.@variable(model, 0 <= x[i = 1:nsc] <= 1, Int)
-    
+    JuMP.@variable(model, 0 <= x[i=1:nsc] <= 1, Int)
+
     # Add constraints that eliminate forbidden patterns in the truth tables.
     for con in cons
-        f_vec = findall(!,con.specification)
+        f_vec = findall(!, con.specification)
         num_vars = length(con.variables)
         for f in f_vec
             # Sum of matching literals must be <= num_vars - 1 (i.e., at least one differs)
-            JuMP.@constraint(model, sum(j-> iszero(combs[num_vars][f][j]) ? (1 - x[con.variables[j]]) : x[con.variables[j]], 1:num_vars) <= num_vars -1)
+            JuMP.@constraint(model, sum(j -> iszero(combs[num_vars][f][j]) ? (1 - x[con.variables[j]]) : x[con.variables[j]], 1:num_vars) <= num_vars - 1)
         end
     end
     if isempty(objs)
@@ -48,9 +48,9 @@ function findmin(problem::AbstractProblem,tag::Bool; optimizer, env)
     else
         # Aggregate objective pieces based on the boolean of the associated variable
         obj_sum = sum(objs) do obj
-            (1-x[obj.variables[1]])*obj.specification[1] + x[obj.variables[1]]*obj.specification[2]
+            (1 - x[obj.variables[1]]) * obj.specification[1] + x[obj.variables[1]] * obj.specification[2]
         end
-        tag ? JuMP.@objective(model,  Min, obj_sum) : JuMP.@objective(model,  Max, obj_sum)
+        tag ? JuMP.@objective(model, Min, obj_sum) : JuMP.@objective(model, Max, obj_sum)
     end
 
     # Solve and validate feasibility
@@ -76,8 +76,8 @@ function factoring(m, n, N; optimizer, env)
     fact3 = Factoring(m, n, N)
     res3 = reduceto(CircuitSAT, fact3)
     # Build CircuitSAT instance with constraints enabled
-    problem = CircuitSAT(res3.circuit.circuit; use_constraints=true);
+    problem = CircuitSAT(res3.circuit.circuit; use_constraints=true)
     # Solve for boolean assignments then reconstruct integer factors
     vals = findmin(problem, true; optimizer, env)
-    return ProblemReductions.read_solution(fact3, [vals[res3.p]...,vals[res3.q]...])
+    return ProblemReductions.read_solution(fact3, [vals[res3.p]..., vals[res3.q]...])
 end

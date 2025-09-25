@@ -22,6 +22,7 @@ export BooleanInferenceProblem,BooleanResultBranchCount,NumOfVertices,NumOfClaus
 
 # interface
 export convert_cnf_to_bip,convert_circuit_to_bip,convert_sat_to_bip,solve_boolean_inference_problem,solve_factoring,solve_sat_with_assignments
+export solve_boolean_inference_problem_with_contraction,solve_sat_problem_with_contraction,solve_factoring_with_contraction,branch_and_reduce_with_contraction
 
 # reducer
 export NoReducer,decide_literal

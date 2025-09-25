@@ -94,10 +94,42 @@ function _neighboring(he2v::Vector{Vector{Int}}, vs::Vector{Int})
 end
 
 function subhg(bip::BooleanInferenceProblem, bs::AbstractBranchingStatus)
-    # Extract decided vertices
-    decided_v = [i for i in 1:bip.literal_num if readbit(bs.decided_mask, i) == 1]
-    # Iterate over all hyperedges and collect the hyperedges that contain at least one undecided vertex
-    return [setdiff(bip.he2v[e], decided_v) for e in 1:length(bip.he2v) if bs.undecided_literals[e] > 0], [e for e in 1:length(bip.he2v) if bs.undecided_literals[e] > 0], decided_v
+    # Pre-allocate arrays with estimated sizes
+    n_active_edges = count(>(0), bs.undecided_literals)
+    he2v_filtered = Vector{Vector{Int}}()
+    edge_list = Vector{Int}()
+    sizehint!(he2v_filtered, n_active_edges)
+    sizehint!(edge_list, n_active_edges)
+    
+    # Extract decided vertices efficiently 
+    decided_v = Vector{Int}()
+    sizehint!(decided_v, count_ones(bs.decided_mask))
+    
+    for i in 1:bip.literal_num
+        if readbit(bs.decided_mask, i) == 1
+            push!(decided_v, i)
+        end
+    end
+    
+    # Single pass through hyperedges to filter and compute setdiff
+    for e in 1:length(bip.he2v)
+        if bs.undecided_literals[e] > 0
+            push!(edge_list, e)
+            # Efficiently compute setdiff by filtering out decided vertices
+            # Pre-allocate with maximum possible size (the edge size)
+            undecided_vertices = Vector{Int}()
+            sizehint!(undecided_vertices, length(bip.he2v[e]))
+            
+            for v in bip.he2v[e]
+                if readbit(bs.decided_mask, v) == 0
+                    push!(undecided_vertices, v)
+                end
+            end
+            push!(he2v_filtered, undecided_vertices)
+        end
+    end
+    
+    return he2v_filtered, edge_list, decided_v
 end
 
 function gen_sub_tensor(
