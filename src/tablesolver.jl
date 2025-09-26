@@ -32,84 +32,127 @@ The function uses the following key concepts:
 - **Internal variables**: Variables that only appear in clauses within the current subproblem  
 - **Tensor contraction**: Efficiently computes the feasibility of variable assignments using tropical arithmetic
 """
-function OptimalBranchingCore.branching_table(bip::BooleanInferenceProblem, bs::AbstractBranchingStatus, solver::TNContractionSolver, subbip::SubBIP)
-	out_vs_num = length(subbip.outside_vs_ind)
-	vs_num = length(subbip.vs)
-	
-	# Early return for edge cases
-	out_vs_num == 0 && return BranchingTable(0, [Int[]])
-	
-	# Precompute internal variable indices
-	internal_vs_ind = setdiff(1:vs_num, subbip.outside_vs_ind)
-	
-	# Create optimized index mappings using BitSet for faster membership testing
-	outside_vs_set = BitSet(subbip.outside_vs_ind)
-	
-	# Precompute position mappings for both boundary and internal variables
-	outside_pos = Dict{Int, Int}()
-	internal_pos = Dict{Int, Int}()
-	for (i, idx) in enumerate(subbip.outside_vs_ind)
-		outside_pos[idx] = i
-	end
-	for (i, idx) in enumerate(internal_vs_ind)
-		internal_pos[idx] = i
-	end
-	
-	possible_configurations = Vector{Vector{Bool}}[]
-	sizehint!(possible_configurations, min(2^out_vs_num, 1000))  # Cap the hint at reasonable size
-	
-	# Pre-allocate reusable vectors
-	out_index = Vector{Int}(undef, out_vs_num)
-	vec = Vector{Any}(undef, vs_num)
-	
-	# Fill the constant parts of vec (internal variables always get :)
-	for var_idx in 1:vs_num
-		if !(var_idx in outside_vs_set)
-			vec[var_idx] = (:)
-		end
-	end
-	
-	# Enumerate all possible configurations of boundary variables (2^out_vs_num possibilities)
-	for config_idx in 0:(2^out_vs_num-1)
-		# Convert integer config_idx to tensor indices directly
-		@inbounds for j in 0:out_vs_num-1
-			out_index[j+1] = (config_idx & (1 << j) != 0) ? 2 : 1
-		end
-		
-		# Update only the boundary variable positions in vec
-		@inbounds for var_idx in subbip.outside_vs_ind
-			vec[var_idx] = out_index[outside_pos[var_idx]]
-		end
-		
-		# Slice by the fixed boundary 
-		# Find all positions where the contracted tensor equals Tropical(0.0) (feasible)
-		in_indies = findall(==(Tropical(0.0)), subbip.sub_tensors[vec...])
-		
-		# Skip this boundary configuration if no feasible internal assignments exist
-		isempty(in_indies) && continue
-		
-		# Pre-allocate the configuration vector for this boundary assignment
-		pcs = Vector{Vector{Bool}}(undef, length(in_indies))
-		
-		# Generate all possible configurations for this boundary assignment
-		@inbounds for (k, in_index) in pairs(in_indies)
-			assignment = Vector{Bool}(undef, vs_num)
-			
-			# Process boundary variables
-			for var_idx in subbip.outside_vs_ind
-				assignment[var_idx] = out_index[outside_pos[var_idx]] == 2
-			end
-			
-			# Process internal variables
-			for var_idx in internal_vs_ind
-				assignment[var_idx] = in_index[internal_pos[var_idx]] == 2
-			end
-			
-			pcs[k] = assignment
-		end
-		push!(possible_configurations, pcs)
-	end
-	
-	# Return empty branching table if no feasible configurations found, otherwise return the computed table
-	return isempty(possible_configurations) ? BranchingTable(0, [Int[]]) : BranchingTable(vs_num, possible_configurations)
+function OptimalBranchingCore.branching_table(
+    bip::BooleanInferenceProblem,
+    bs::AbstractBranchingStatus,
+    solver::TNContractionSolver,
+    subbip::SubBIP
+)
+    out_vs_num = length(subbip.outside_vs_ind)
+    vs_num = length(subbip.vs)
+
+    # pick packed integer type for bit_length = vs_num
+    INT = _best_uint(Val(vs_num))  # returns a Type like UInt64 or LongLongUInt{N}
+
+    # Early return (empty): table::Vector{Vector{INT}} with one empty group
+    if out_vs_num == 0
+        empty_group = Vector{INT}()                        # Vector{INT}()
+        empty_table = Vector{Vector{INT}}([empty_group])   # Vector{Vector{INT}}
+        return BranchingTable{INT}(0, empty_table)
+    end
+
+    outside = subbip.outside_vs_ind
+
+    # pos_outside[v] = position of v in `outside` (0 if not boundary)
+    pos_outside = zeros(Int, vs_num)
+    @inbounds for (i, v) in pairs(outside)
+        pos_outside[v] = i
+    end
+
+    # internal list by one linear scan
+    internal_len = vs_num - out_vs_num
+    internal_vs_ind = Vector{Int}(undef, internal_len)
+    k = 0
+    @inbounds for v in 1:vs_num
+        if pos_outside[v] == 0
+            k += 1
+            internal_vs_ind[k] = v
+        end
+    end
+
+    # pos_internal[v] = position of v in internal list (0 if not internal)
+    pos_internal = zeros(Int, vs_num)
+    @inbounds for (i, v) in pairs(internal_vs_ind)
+        pos_internal[v] = i
+    end
+
+    # ---- preallocs ----
+    possible_configurations = Vector{Vector{INT}}()  # groups; each group is Vector{INT}
+    local_hint = (out_vs_num <= 60) ? min(1 << out_vs_num, 1000) : 1000
+    sizehint!(possible_configurations, local_hint)
+
+    # out_index[j] ∈ {1,2} for boundary variables, maps bit -> tensor index
+    out_index = Vector{Int}(undef, out_vs_num)
+
+    # vec holds slicing indices for subbip.sub_tensors[vec...]
+    # initialize all to : ; only boundary dims will be overwritten to 1/2 per config
+    vec = Vector{Union{Colon,Int}}(undef, vs_num)
+    fill!(vec, Colon())
+
+    # ---- enumerate all boundary configurations ----
+    @inbounds for config_idx in 0:(2^out_vs_num-1)
+        # integer -> tensor indices {1,2}
+        @inbounds for j in 0:out_vs_num-1
+            out_index[j+1] = (config_idx & (1 << j)) != 0 ? 2 : 1
+        end
+
+        # update boundary slice indices
+        @inbounds for v in outside
+            vec[v] = out_index[pos_outside[v]]
+        end
+
+        # feasible internal assignments => Tropical(0.0)
+        # Use view to avoid copying the entire sliced array
+        tensor_view = @view subbip.sub_tensors[vec...]
+        in_indies = findall(==(Tropical(0.0)), tensor_view)
+        isempty(in_indies) && continue
+
+        # pack each feasible full assignment to an INT
+        pcs = Vector{INT}(undef, length(in_indies))
+        @inbounds for (k2, in_index) in pairs(in_indies)
+            x = zero(INT)
+
+            # boundary bits
+            @inbounds for v in outside
+                if out_index[pos_outside[v]] == 2
+                    x |= (one(INT) << (v - 1))
+                end
+            end
+            # internal bits (in_index is over internal dims)
+            @inbounds for v in internal_vs_ind
+                if in_index[pos_internal[v]] == 2
+                    x |= (one(INT) << (v - 1))
+                end
+            end
+
+            pcs[k2] = x
+        end
+
+        push!(possible_configurations, pcs)
+    end
+
+    if isempty(possible_configurations)
+        empty_group = Vector{INT}()
+        empty_table = Vector{Vector{INT}}([empty_group])
+        return BranchingTable{INT}(0, empty_table)
+    else
+        return BranchingTable{INT}(vs_num, possible_configurations)
+    end
+end
+
+# choose smallest unsigned for bit_length
+@generated function _best_uint(nbits::Val{N}) where {N}
+    if N <= 8
+        :(UInt8)
+    elseif N <= 16
+        :(UInt16)
+    elseif N <= 32
+        :(UInt32)
+    elseif N <= 64
+        :(UInt64)
+    elseif N <= 128
+        :(UInt128)
+    else
+        :(LongLongUInt{N})
+    end
 end
