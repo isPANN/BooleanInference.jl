@@ -78,3 +78,8 @@ function clear_all_region_caches!()
     return nothing
 end
 
+function set_last_region!(problem::TNProblem, region_id::Int)
+    problem.ws.last_region_id = region_id
+    return nothing
+end
+

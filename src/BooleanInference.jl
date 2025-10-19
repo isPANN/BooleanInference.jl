@@ -62,7 +62,7 @@ export TensorMasks, PropagationBuffers
 
 # Export region management functions
 export cache_region!, get_cached_region_entry, get_cached_region, cache_region_contraction!
-export get_cached_region_contraction, clear_region_cache!, clear_all_region_caches!
+export get_cached_region_contraction, clear_region_cache!, clear_all_region_caches!, set_last_region!
 
 # Export k-neighboring functions
 export k_neighboring, KNNWorkspace

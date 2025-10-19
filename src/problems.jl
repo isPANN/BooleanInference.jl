@@ -106,8 +106,10 @@ end
 mutable struct DynamicWorkspace
     cached_doms::Vector{DomainMask}
     has_cached_solution::Bool
+    branch_queue::Union{Nothing, Any}
+    last_region_id::Union{Nothing, Int}
 end
-DynamicWorkspace(var_num::Int) = DynamicWorkspace(Vector{DomainMask}(undef, var_num), false)
+DynamicWorkspace(var_num::Int) = DynamicWorkspace(Vector{DomainMask}(undef, var_num), false, nothing, nothing)
 
 struct Region
     id::Int
