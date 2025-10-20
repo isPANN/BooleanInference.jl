@@ -14,6 +14,7 @@ end
 
 function solve(problem::TNProblem, bsconfig::BranchingStrategy, reducer::AbstractReducer)
     try
+        reset_branching_stats!(problem)  # Reset stats before solving
         depth = branch_and_reduce(problem, bsconfig, reducer, Tropical{Float64}; show_progress=false)
         res = last_branch_problem(problem)
         return (res, depth)
@@ -80,7 +81,7 @@ function solve_factoring(
         circuit_sat = reduceto(CircuitSAT, fproblem)
         problem = CircuitSAT(circuit_sat.circuit.circuit; use_constraints=true)
         tn_problem = setup_from_sat(problem)
-        res, _ = solve(tn_problem, bsconfig, reducer)
+        res, depth = solve(tn_problem, bsconfig, reducer)
         isnothing(res) && return nothing, nothing
         a = get_var_value(res, circuit_sat.q)
         b = get_var_value(res, circuit_sat.p)

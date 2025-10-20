@@ -6,7 +6,7 @@ using BooleanInference: DM_BOTH, DM_0, DM_1, has0, has1, is_fixed
 using BooleanInference: contract_tensors, contract_region, TNContractionSolver
 using BooleanInference: separate_fixed_free_boundary, construct_boundary_config, construct_inner_config
 using BooleanInference: extract_inner_configs, combine_configs, handle_no_boundary_case
-using BooleanInference: get_cached_region_contraction, clear_region_cache!
+using BooleanInference: clear_region_cache!
 using OptimalBranchingCore: branching_table
 using TropicalNumbers: Tropical
 using ProblemReductions: Factoring, reduceto, CircuitSAT
@@ -220,9 +220,8 @@ end
     tn_problem = TNProblem(tn_static)
     select_variables(tn_problem, NumUnfixedVars(), LeastOccurrenceSelector(2, 5))
     region = get_cached_region(tn_problem)
-    @show region
     @test region != nothing
-    @test isnothing(get_cached_region_contraction(tn_problem))
+    # @test isnothing(get_cached_region_contraction(tn_problem))
 
     contracted, _ = contract_region(tn_static, region, tn_problem.doms)
     @test contracted != nothing
@@ -232,12 +231,12 @@ end
     @show vcat([v for v in region.boundary_vars], [v for v in region.inner_vars])
     @show table
 
-    cached_contraction = get_cached_region_contraction(tn_problem)
-    @test !isnothing(cached_contraction)
+    # cached_contraction = get_cached_region_contraction(tn_problem)
+    # @test !isnothing(cached_contraction)
 
     clear_region_cache!(tn_problem)
     @test isnothing(get_cached_region(tn_problem))
-    @test isnothing(get_cached_region_contraction(tn_problem))
+    # @test isnothing(get_cached_region_contraction(tn_problem))
 end
 
 

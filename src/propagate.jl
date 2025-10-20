@@ -118,17 +118,24 @@ end
 # Compute which tensor configurations are feasible given current variable domains.
 # Returns false if no feasible configuration exists.
 @inline function compute_feasible_configs!(feasible::BitVector, allowed_axis::BitVector, working_doms::Vector{DomainMask}, tensor::BoolTensor, masks::TensorMasks)
-    n_cfg = length(masks.sat)
+    # Cache struct fields to local variables to reduce getproperty overhead
+    sat = masks.sat
+    n_cfg = length(sat)
     
     # Resize buffers to match this tensor's configuration space
     resize!(feasible, n_cfg)
     resize!(allowed_axis, n_cfg)
     
     # Start with satisfying configurations
-    copyto!(feasible, masks.sat)
+    copyto!(feasible, sat)
+    
+    # Cache frequently accessed fields
+    var_axes = tensor.var_axes
+    axis_masks0 = masks.axis_masks0
+    axis_masks1 = masks.axis_masks1
     
     # Filter by each variable's domain
-    @inbounds for (axis, var_id) in enumerate(tensor.var_axes)
+    @inbounds for (axis, var_id) in enumerate(var_axes)
         dm = working_doms[var_id]
         dm_bits = dm.bits
         
@@ -139,9 +146,9 @@ end
         
         # Directly intersect with the appropriate mask(s)
         if dm_bits == 0x01  # DM_0: only 0 allowed
-            feasible .&= masks.axis_masks0[axis]
+            feasible .&= axis_masks0[axis]
         elseif dm_bits == 0x02  # DM_1: only 1 allowed
-            feasible .&= masks.axis_masks1[axis]
+            feasible .&= axis_masks1[axis]
         else  # dm_bits == 0x00: contradiction, but shouldn't happen
             return false
         end
@@ -165,7 +172,10 @@ end
     first_idx = findfirst(feasible)
     config = first_idx - 1
     
-    @inbounds for (axis, var_id) in enumerate(tensor.var_axes)
+    # Cache field to reduce getproperty overhead
+    var_axes = tensor.var_axes
+    
+    @inbounds for (axis, var_id) in enumerate(var_axes)
         bit_val = (config >> (axis - 1)) & 1
         # Branchless: avoid conditional for better performance
         required_bits = ifelse(bit_val == 1, DM_1.bits, DM_0.bits)
@@ -200,7 +210,12 @@ end
     n_cfg = length(feasible)
     resize!(temp, n_cfg)
     
-    @inbounds for (axis, var_id) in enumerate(tensor.var_axes)
+    # Cache frequently accessed fields to reduce getproperty overhead
+    var_axes = tensor.var_axes
+    axis_masks0 = masks.axis_masks0
+    axis_masks1 = masks.axis_masks1
+    
+    @inbounds for (axis, var_id) in enumerate(var_axes)
         dm = working_doms[var_id]
         dm_bits = dm.bits
         
@@ -208,7 +223,7 @@ end
         if (dm_bits & 0x01) != 0  # has0(dm)
             # Use copyto! + .&= to avoid RHS temporary array
             copyto!(temp, feasible)
-            temp .&= masks.axis_masks0[axis]
+            temp .&= axis_masks0[axis]
             if !any(temp)  # No support for 0
                 if !update_domain!(working_doms, var_id, dm_bits, DM_1.bits, 
                                   v2t, tensor_queue, in_queue)
@@ -220,7 +235,7 @@ end
         # Check support for value 1
         if (dm_bits & 0x02) != 0  # has1(dm)
             copyto!(temp, feasible)
-            temp .&= masks.axis_masks1[axis]
+            temp .&= axis_masks1[axis]
             if !any(temp)  # No support for 1
                 if !update_domain!(working_doms, var_id, dm_bits, DM_0.bits,
                                   v2t, tensor_queue, in_queue)

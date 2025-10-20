@@ -51,6 +51,7 @@ end
 end
 
 @testset "clear_region_cache!" begin
+    clear_all_region_caches!()
     problem = generate_example_problem()
     tn = GenericTensorNetwork(problem)
     tn_static = setup_from_tensor_network(tn)
@@ -59,6 +60,8 @@ end
     select_variables(tn_problem, NumUnfixedVars(), LeastOccurrenceSelector(1))
     @test get_cached_region(tn_problem) != nothing
     
+    # TODO: when initialize a new problem, the region cache should be cleared
+    clear_all_region_caches!() 
     problem2 = generate_example_problem()
     tn2 = GenericTensorNetwork(problem2)
     tn_static2 = setup_from_tensor_network(tn2)

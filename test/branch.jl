@@ -13,8 +13,9 @@ using TropicalNumbers: Tropical
 
 @testset "branch" begin
     # fproblem = Factoring(12,12, 10395529)
-    # fproblem = Factoring(2,2,4)
+    # fproblem = Factoring(3,3,12)
     fproblem = Factoring(10,10,601343)
+    # fproblem = Factoring(14,14, 140000983)
 
     circuit_sat = reduceto(CircuitSAT, fproblem)
     problem = CircuitSAT(circuit_sat.circuit.circuit; use_constraints=true)
@@ -24,7 +25,7 @@ using TropicalNumbers: Tropical
     tn_problem = TNProblem(tn_static)
     @test !has_last_branch_problem(tn_problem)
     br_strategy = BranchingStrategy(table_solver = TNContractionSolver(), selector = LeastOccurrenceSelector(1, 2), measure = NumUnfixedVars())
-    @profilehtml res = branch_and_reduce(tn_problem, br_strategy, NoReducer(), Tropical{Float64}; show_progress=false)
+    @time res = branch_and_reduce(tn_problem, br_strategy, NoReducer(), Tropical{Float64}; show_progress=false)
     if res != Tropical(-Inf)
         @test has_last_branch_problem(tn_problem)
         res = last_branch_problem(tn_problem)

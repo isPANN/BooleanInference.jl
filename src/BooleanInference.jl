@@ -10,12 +10,13 @@ using GenericTensorNetworks.OMEinsum
 import ProblemReductions
 import ProblemReductions: CircuitSAT, Circuit, Factoring, reduceto, Satisfiability
 using DataStructures
-using DataStructures: PriorityQueue
+using DataStructures: BinaryMinHeap
 
 # using GenericTensorNetworks: ∧, ∨, ¬
 
 include("problems.jl")
 include("region.jl")
+include("branch_state.jl") 
 include("measure.jl")
 include("utils.jl")
 include("knn.jl")
@@ -40,6 +41,7 @@ export setup_problem, setup_from_tensor_network, setup_from_cnf, setup_from_circ
 
 # Export problem state functions
 export is_solved, cache_branch_solution!, reset_last_branch_problem!, has_last_branch_problem, last_branch_problem
+export get_branching_stats, reset_branching_stats!, print_branching_stats
 
 # Export solving functions
 export solve, solve_sat_problem, solve_sat_with_assignments, solve_factoring

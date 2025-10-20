@@ -1,87 +1,51 @@
-struct BranchingCandidate
-    focus_var::Int
-    region::Union{Nothing,Region}
-    variables::Vector{Int}
-    table::OptimalBranchingCore.BranchingTable
-    result::OptimalBranchingCore.OptimalBranchingResult
-    signature::Vector{UInt8}  # domain mask of the variables
-end
-
-mutable struct RegionMembership
-    regions::Set{Int}
-end
-RegionMembership() = RegionMembership(Set{Int}())
-
-mutable struct GammaQueueState
-    queue::PriorityQueue{Int,Float64}
-    candidates::Dict{Int,BranchingCandidate}
-    var_regions::Vector{RegionMembership}
-    stale_regions::Set{Int}
-    pending_regions::Set{Int}  # regions that need to be refreshed
-end
-function GammaQueueState(var_num::Int)
-    memberships = [RegionMembership() for _ in 1:var_num]
-    GammaQueueState(
-        PriorityQueue{Int,Float64}(),
-        Dict{Int,BranchingCandidate}(),
-        memberships,
-        Set{Int}(),
-        Set{Int}(),
-    )
-end
-
-@inline function register_candidate_regions!(state::GammaQueueState, candidate::BranchingCandidate)
-    region = candidate.region
-    region === nothing && return nothing
-    region_id = region.id
-    for var_id in candidate.variables
-        push!(state.var_regions[var_id].regions, region_id)
+# Register candidate ownership for variables
+function register_candidate_regions!(state::GammaQueueState, owner_var::Int, candidate::BranchingCandidate)
+    candidate.region === nothing && return
+    owner = owner_var
+    var_regions = state.var_regions
+    @inbounds for var_id in candidate.variables
+        owners = var_regions[var_id]
+        owner ∉ owners && push!(owners, owner)
     end
-    return nothing
 end
 
-@inline function unregister_candidate_regions!(state::GammaQueueState, candidate::BranchingCandidate)
-    region = candidate.region
-    isnothing(region) && return nothing
-    for var_id in candidate.variables
-        delete!(state.var_regions[var_id].regions, region.id)
+# Unregister candidate ownership when candidate is invalidated
+function unregister_candidate_regions!(state::GammaQueueState, owner_var::Int, candidate::BranchingCandidate)
+    candidate.region === nothing && return
+    owner = owner_var
+    var_regions = state.var_regions
+    @inbounds for var_id in candidate.variables
+        owners = var_regions[var_id]
+        idx = findfirst(==(owner), owners)
+        idx !== nothing && deleteat!(owners, idx)
     end
-    return nothing
 end
 
-@inline function invalidate_candidate!(state::GammaQueueState, var_id::Int)
+function invalidate_candidate!(state::GammaQueueState, var_id::Int)
     candidate = pop!(state.candidates, var_id, nothing)
-    !isnothing(candidate) && unregister_candidate_regions!(state, candidate)
-    haskey(state.queue, var_id) && delete!(state.queue, var_id)
-    delete!(state.stale_regions, var_id)
-    delete!(state.pending_regions, var_id)
-    return nothing
+    if !isnothing(candidate)
+        unregister_candidate_regions!(state, var_id, candidate)
+        # Clear pending flag if this candidate had a region
+        delete!(state.pending_candidates, var_id)
+    end
+    # Lazy deletion: mark as deleted instead of removing from heap
+    push!(state.deleted_vars, var_id)
 end
 
-@inline function mark_regions_stale!(state::GammaQueueState, vars::Vector{Int})
-    isempty(vars) && return nothing
-    
-    for var_id in vars
-        (var_id < 1 || var_id > length(state.var_regions)) && continue
-        
-        for region_id in state.var_regions[var_id].regions
-            push!(state.stale_regions, region_id)
-            push!(state.pending_regions, region_id)
+function mark_candidates_pending!(state::GammaQueueState, vars::Vector{Int})
+    var_regions = state.var_regions
+    pending = state.pending_candidates
+    n = length(var_regions)
+    @inbounds for var_id in vars
+        (var_id < 1 || var_id > n) && continue
+        owners = var_regions[var_id]
+        for owner_var in owners
+            push!(pending, owner_var)
         end
     end
-    return nothing
 end
 
-@inline function refresh_pending_regions!(problem, config, selector, state::GammaQueueState)
-    isempty(state.pending_regions) && return nothing
-    
-    for region_id in collect(state.pending_regions)  # Copy to avoid mutation during iteration
-        ensure_candidate!(problem, config, selector, state, region_id)
-    end
-    return nothing
-end
-
-@inline function gamma_queue_state(problem::TNProblem)
+function gamma_queue_state(problem::TNProblem)::GammaQueueState
     ws = problem.ws
     state = ws.branch_queue
     var_num = length(problem.static.vars)
@@ -91,18 +55,20 @@ end
         ws.branch_queue = new_state
         return new_state
     end
-    return state
+    return state::GammaQueueState
 end
 
-@inline function dom_signature(problem::TNProblem, vars::Vector{Int})
-    sig = Vector{UInt8}(undef, length(vars))
+@inline function dom_versions(problem::TNProblem, vars::Vector{Int})
+    versions = Vector{UInt32}(undef, length(vars))
+    # Cache field access to reduce getproperty overhead
+    var_versions = problem.ws.var_versions
     @inbounds for (i, var_id) in enumerate(vars)
-        sig[i] = problem.doms[var_id].bits
+        versions[i] = var_versions[var_id]
     end
-    return sig
+    return versions
 end
 
-@inline function build_branching_candidate(
+function build_branching_candidate(
     problem::TNProblem,
     config::OptimalBranchingCore.BranchingStrategy,
     variables::Vector{Int},
@@ -117,17 +83,19 @@ end
         config.set_cover_solver,
     )
     focus_var = region === nothing ? (isempty(variables) ? 0 : variables[1]) : region.id
-    signature = dom_signature(problem, variables)
-    return BranchingCandidate(focus_var, region, variables, tbl, result, signature)
+    versions = dom_versions(problem, variables)
+    return BranchingCandidate(focus_var, region, variables, result, versions)
 end
 
 @inline function candidate_valid(candidate::BranchingCandidate, problem::TNProblem)::Bool
     vars = candidate.variables
-    sig = candidate.signature
-    length(vars) != length(sig) && return false
+    versions = candidate.versions
+    length(vars) != length(versions) && return false
     
+    # Cache field access to reduce getproperty overhead
+    var_versions = problem.ws.var_versions
     @inbounds for (i, var_id) in enumerate(vars)
-        problem.doms[var_id].bits != sig[i] && return false
+        var_versions[var_id] != versions[i] && return false
     end
     return true
 end
@@ -176,25 +144,33 @@ function ensure_candidate!(
 )
     # Check if we can reuse existing candidate
     candidate = get(state.candidates, var_id, nothing)
-    is_stale = var_id ∈ state.stale_regions
     
-    if !isnothing(candidate) && !is_stale && candidate_valid(candidate, problem)
-        return candidate
+    if !isnothing(candidate)
+        # Cache region access to avoid repeated getproperty
+        cand_region = candidate.region
+        owner_pending = var_id ∈ state.pending_candidates
+        
+        if !owner_pending && candidate_valid(candidate, problem)
+            return candidate
+        end
+        
+        # Invalidate old candidate
+        invalidate_candidate!(state, var_id)
     end
-    
-    # Invalidate old candidate if exists
-    !isnothing(candidate) && invalidate_candidate!(state, var_id)
     
     # Compute new candidate
     candidate = compute_branching_candidate_for_var(problem, config, selector, var_id)
-    isnothing(candidate) && (delete!(state.stale_regions, var_id); delete!(state.pending_regions, var_id); return nothing)
+    isnothing(candidate) && return nothing
     
     # Register new candidate
     state.candidates[var_id] = candidate
-    state.queue[var_id] = candidate.result.γ
-    register_candidate_regions!(state, candidate)
-    delete!(state.stale_regions, var_id)
-    delete!(state.pending_regions, var_id)
+    # Push to heap with negative gamma for max-heap behavior
+    push!(state.queue, (-candidate.result.γ, var_id))
+    delete!(state.deleted_vars, var_id)  # Clear deletion flag if present
+    register_candidate_regions!(state, var_id, candidate)
+    
+    # Clear pending flag for the newly computed candidate's region
+    delete!(state.pending_candidates, var_id)
     
     return candidate
 end
@@ -206,10 +182,29 @@ function prune_fixed!(state::GammaQueueState, problem::TNProblem)
     return nothing
 end
 
-function populate_queue!(problem, config, selector, state::GammaQueueState)
+function prune_queue_fixed!(state::GammaQueueState, problem::TNProblem)
+    # Mark fixed variables for lazy deletion
+    # Cache field access to reduce getproperty overhead
+    doms = problem.doms
+    deleted_vars = state.deleted_vars
+    for var_id in keys(state.candidates)
+        is_fixed(doms[var_id]) && push!(deleted_vars, var_id)
+    end
+    return nothing
+end
+
+function initialize_queue_lazily!(problem, state::GammaQueueState)
+    # Lazily initialize queue with all unfixed variables using a simple heuristic
+    # The actual gamma will be computed only when needed
+    queue = state.queue
+    deleted_vars = state.deleted_vars
     for var_id in get_unfixed_vars(problem.doms)
-        (haskey(state.candidates, var_id) && haskey(state.queue, var_id)) && continue
-        ensure_candidate!(problem, config, selector, state, var_id)
+        var_id ∈ deleted_vars && continue
+        haskey(state.candidates, var_id) && continue
+        # Use a simple heuristic: degree (higher degree = higher priority)
+        # Store as (-heuristic, var_id) for max-heap behavior
+        deg = Float64(problem.static.vars[var_id].deg)
+        push!(queue, (-deg, var_id))
     end
     return nothing
 end
@@ -221,20 +216,54 @@ function select_branching_candidate(
     selector = config.selector
     selector isa LeastOccurrenceSelector || return default_branching_candidate(problem, config)
 
-    state = gamma_queue_state(problem)  # GammaQueueState
+    state = gamma_queue_state(problem)
     prune_fixed!(state, problem)
-    refresh_pending_regions!(problem, config, selector, state)
-    isempty(state.queue) && populate_queue!(problem, config, selector, state)
+    prune_queue_fixed!(state, problem)
+    
+    # Lazily initialize queue if empty
+    isempty(state.queue) && initialize_queue_lazily!(problem, state)
 
     while !isempty(state.queue)
-        focus_var, _ = peek(state.queue)
-        candidate = ensure_candidate!(problem, config, selector, state, focus_var)
-        candidate === nothing && continue
-
-        region = candidate.region
-        if region !== nothing
-            set_last_region!(problem, region.id)
+        # Pop from heap (lazy deletion - skip invalid entries)
+        neg_gamma, focus_var = pop!(state.queue)
+        
+        # Skip if marked as deleted
+        if focus_var ∈ state.deleted_vars
+            delete!(state.deleted_vars, focus_var)
+            continue
         end
+        
+        # Check if we already have a valid candidate
+        candidate = get(state.candidates, focus_var, nothing)
+        if candidate !== nothing
+            owner_pending = focus_var ∈ state.pending_candidates
+            
+            if !owner_pending && candidate_valid(candidate, problem)
+                # Valid cached candidate - use it directly
+                cand_region = candidate.region
+                if !isnothing(cand_region)
+                    set_last_region!(problem, cand_region.id)
+                end
+                # No need to delete pending - already not pending
+                return candidate
+            end
+        end
+
+        # Candidate is missing, invalid, or pending - compute/refresh it now (lazily)
+        # ensure_candidate! will delete from pending_candidates upon success
+        candidate = ensure_candidate!(problem, config, selector, state, focus_var)
+        
+        if candidate === nothing
+            # Failed to compute candidate (e.g., var became fixed) - skip and try next
+            continue
+        end
+
+        # Successfully computed/refreshed candidate - use it
+        cand_region = candidate.region
+        if !isnothing(cand_region)
+            set_last_region!(problem, cand_region.id)
+        end
+        # No need to delete pending - ensure_candidate! already did it
         return candidate
     end
 
@@ -259,16 +288,23 @@ function OptimalBranchingCore.branch_and_reduce(
     
     candidate = select_branching_candidate(problem, config)
     variables = candidate.variables
-    tbl = candidate.table
     result = candidate.result
     @debug "selected_gamma" focus=(candidate.region === nothing ? nothing : candidate.region.id) γ=result.γ
     
     clauses = OptimalBranchingCore.get_clauses(result)
     @debug "A new branch-level search starts with $(length(clauses)) clauses: $(clauses)"
+    problem.ws.total_branches += 1
+    problem.ws.total_subproblems += length(clauses)
+
+    # Save workspace state before branching for rollback
+    saved_var_versions = copy(problem.ws.var_versions)
     
-    return sum(enumerate(clauses)) do (i, branch)
+    result = sum(enumerate(clauses)) do (i, branch)
         show_progress && (OptimalBranchingCore.print_sequence(stdout, tag); println(stdout))
         @debug "branch=$branch, n_unfixed=$(problem.n_unfixed)"
+        
+        # Save state before this branch
+        branch_saved_versions = copy(problem.ws.var_versions)
         
         subproblem, local_value = OptimalBranchingCore.apply_branch(
             problem, 
@@ -280,6 +316,8 @@ function OptimalBranchingCore.branch_and_reduce(
         
         if local_value == 0 || subproblem.n_unfixed == 0 && any(dm -> dm.bits == 0x00, subproblem.doms)
             @debug "Returning zero: local_value=$local_value, n_unfixed=$(subproblem.n_unfixed), has_contradiction=$(any(dm -> dm.bits == 0x00, subproblem.doms))"
+            # Restore state before returning
+            copyto!(problem.ws.var_versions, branch_saved_versions)
             return zero(result_type)
         end
         
@@ -293,8 +331,16 @@ function OptimalBranchingCore.branch_and_reduce(
             show_progress=show_progress
         )
         
+        # Restore state after this branch completes (for next sibling branch)
+        copyto!(problem.ws.var_versions, branch_saved_versions)
+        
         sub_result * result_type(local_value)
     end
+    
+    # Restore original state after all branches complete
+    copyto!(problem.ws.var_versions, saved_var_versions)
+    
+    return result
 end
 
 function OptimalBranchingCore.optimal_branching_rule(
@@ -337,15 +383,38 @@ function OptimalBranchingCore.apply_branch(problem::TNProblem, clause, variables
     (new_n_unfixed > problem.n_unfixed || (new_n_unfixed == problem.n_unfixed && n_fixed == 0)) && 
         return (create_failed_problem(problem), 0)
     
-    # Track changed variables
-    changed_vars = [idx for (idx, dm) in enumerate(propagated_doms) if dm.bits != problem.doms[idx].bits]
+    # Single-pass: update version numbers and mark candidates pending (zero allocation)
+    state = problem.ws.branch_queue
+    if state isa GammaQueueState
+        # Fast path with pending marking
+        var_regions = state.var_regions
+        pending = state.pending_candidates
+        var_versions = problem.ws.var_versions
+        old_doms = problem.doms
+        n = length(var_regions)
+        @inbounds for idx in 1:length(propagated_doms)
+            propagated_doms[idx].bits == old_doms[idx].bits && continue
+            # Variable changed - update version
+            var_versions[idx] += 1
+            # Mark affected candidates as pending
+            (idx < 1 || idx > n) && continue
+            owners = var_regions[idx]
+            for owner_var in owners
+                push!(pending, owner_var)
+            end
+        end
+    else
+        # No queue state - just update versions
+        var_versions = problem.ws.var_versions
+        old_doms = problem.doms
+        @inbounds for idx in 1:length(propagated_doms)
+            propagated_doms[idx].bits != old_doms[idx].bits && (var_versions[idx] += 1)
+        end
+    end
     
     # Create new problem and update caches
     new_problem = TNProblem(problem.static, propagated_doms, new_n_unfixed, problem.ws)
     clear_region_cache!(problem)
-    
-    state = problem.ws.branch_queue
-    state isa GammaQueueState && mark_regions_stale!(state, changed_vars)
     
     return (new_problem, 1)
 end

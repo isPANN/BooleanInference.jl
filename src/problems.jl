@@ -106,10 +106,22 @@ end
 mutable struct DynamicWorkspace
     cached_doms::Vector{DomainMask}
     has_cached_solution::Bool
-    branch_queue
+    branch_queue::Any  # Union{Nothing, GammaQueueState} - type inference handled in branch.jl
     last_region_id::Union{Nothing, Int}
+    var_versions::Vector{UInt32}  # Version number for each variable, incremented when domain changes
+    # Branching statistics
+    total_branches::Int
+    total_subproblems::Int
 end
-DynamicWorkspace(var_num::Int) = DynamicWorkspace(Vector{DomainMask}(undef, var_num), false, nothing, nothing)
+DynamicWorkspace(var_num::Int) = DynamicWorkspace(
+    Vector{DomainMask}(undef, var_num), 
+    false, 
+    nothing, 
+    nothing,
+    zeros(UInt32, var_num),
+    0,
+    0
+)
 
 struct Region
     id::Int
@@ -166,3 +178,28 @@ function last_branch_problem(problem::TNProblem)
     @assert fixed == length(doms)
     return TNProblem(problem.static, doms, 0, problem.ws)
 end
+
+# Branching statistics functions
+function get_branching_stats(problem::TNProblem)
+    return (
+        total_branches = problem.ws.total_branches,
+        total_subproblems = problem.ws.total_subproblems,
+        avg_branching_factor = problem.ws.total_branches > 0 ?
+            problem.ws.total_subproblems / problem.ws.total_branches : 0.0
+    )
+end
+
+function reset_branching_stats!(problem::TNProblem)
+    problem.ws.total_branches = 0
+    problem.ws.total_subproblems = 0
+    return nothing
+end
+
+function print_branching_stats(io::IO, problem::TNProblem)
+    stats = get_branching_stats(problem)
+    println(io, "Branching Statistics:")
+    println(io, "  Total branch points: $(stats.total_branches)")
+    println(io, "  Total subproblems: $(stats.total_subproblems)")
+    println(io, "  Average branching factor: $(round(stats.avg_branching_factor, digits=3))")
+end
+print_branching_stats(problem::TNProblem) = print_branching_stats(stdout, problem)
