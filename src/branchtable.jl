@@ -104,16 +104,54 @@ function combine_configs(boundary_config::Vector{Bool}, inner_configs::Vector{Ve
 end
 
 function get_region_contraction(problem::TNProblem, region::Region)
-    cached = get_cached_region_contraction(problem; region_id=region.id)
+    # Try to get cached contraction
+    cached = get_cached_contraction(problem, region)
+    
     if isnothing(cached)
-        @debug "contract_region_cache_miss" focus=region.id
+        # Not in cache - compute it
+        # @info "Computing region contraction (first time): region_id=$(region.id)"
         contracted, output_vars = contract_region(problem.static, region, problem.doms)
-        cache_region_contraction!(problem, contracted, output_vars; region_id=region.id)
-        return contracted, output_vars
+        
+        # Cache it
+        cache_contraction!(problem, region, contracted, output_vars)
+        
+        tensor = contracted
+        axes_vars = output_vars
     else
-        @debug "contract_region_cache_hit" focus=region.id
-        return cached
+        # Found in cache - reuse it
+        # @info "Reusing cached contraction: region_id=$(region.id)"
+        tensor = cached.tensor
+        axes_vars = cached.vars
     end
+    
+    # Slice the tensor according to currently fixed variables
+    return get_sliced_contraction(tensor, axes_vars, problem.doms)
+end
+
+function get_sliced_contraction(tensor::AbstractArray{Tropical{Float64}}, axes_vars::Vector{Int}, doms::Vector{DomainMask})
+    isempty(axes_vars) && return tensor, axes_vars
+
+    assignments = Tuple{Int,Bool}[]
+    @inbounds for var_id in axes_vars
+        dm = doms[var_id]
+        if is_fixed(dm)
+            push!(assignments, (var_id, has1(dm)))
+        end
+    end
+
+    if isempty(assignments)
+        return tensor, axes_vars
+    end
+
+    axismap = _build_axismap(axes_vars)
+    sliced = slice_region_contraction(tensor, assignments, axismap)
+    remaining_vars = Int[]
+    @inbounds for var_id in axes_vars
+        if !is_fixed(doms[var_id])
+            push!(remaining_vars, var_id)
+        end
+    end
+    return sliced, remaining_vars
 end
 
 function slice_region_contraction(

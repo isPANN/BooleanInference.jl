@@ -4,7 +4,7 @@ struct BranchingCandidate
     variables::Vector{Int}
     table::OptimalBranchingCore.BranchingTable
     result::OptimalBranchingCore.OptimalBranchingResult
-    signature::Vector{UInt8}
+    signature::Vector{UInt8}  # domain mask of the variables
 end
 
 mutable struct RegionMembership
@@ -17,7 +17,7 @@ mutable struct GammaQueueState
     candidates::Dict{Int,BranchingCandidate}
     var_regions::Vector{RegionMembership}
     stale_regions::Set{Int}
-    pending_regions::Set{Int}
+    pending_regions::Set{Int}  # regions that need to be refreshed
 end
 function GammaQueueState(var_num::Int)
     memberships = [RegionMembership() for _ in 1:var_num]
@@ -30,10 +30,7 @@ function GammaQueueState(var_num::Int)
     )
 end
 
-@inline function register_candidate_regions!(
-    state::GammaQueueState,
-    candidate::BranchingCandidate,
-)
+@inline function register_candidate_regions!(state::GammaQueueState, candidate::BranchingCandidate)
     region = candidate.region
     region === nothing && return nothing
     region_id = region.id
@@ -43,24 +40,18 @@ end
     return nothing
 end
 
-@inline function unregister_candidate_regions!(
-    state::GammaQueueState,
-    candidate::BranchingCandidate,
-)
+@inline function unregister_candidate_regions!(state::GammaQueueState, candidate::BranchingCandidate)
     region = candidate.region
-    region === nothing && return nothing
-    region_id = region.id
+    isnothing(region) && return nothing
     for var_id in candidate.variables
-        delete!(state.var_regions[var_id].regions, region_id)
+        delete!(state.var_regions[var_id].regions, region.id)
     end
     return nothing
 end
 
 @inline function invalidate_candidate!(state::GammaQueueState, var_id::Int)
     candidate = pop!(state.candidates, var_id, nothing)
-    if candidate !== nothing
-        unregister_candidate_regions!(state, candidate)
-    end
+    !isnothing(candidate) && unregister_candidate_regions!(state, candidate)
     haskey(state.queue, var_id) && delete!(state.queue, var_id)
     delete!(state.stale_regions, var_id)
     delete!(state.pending_regions, var_id)
@@ -69,13 +60,11 @@ end
 
 @inline function mark_regions_stale!(state::GammaQueueState, vars::Vector{Int})
     isempty(vars) && return nothing
+    
     for var_id in vars
-        if var_id < 1 || var_id > length(state.var_regions)
-            continue
-        end
-        memberships = state.var_regions[var_id].regions
-        isempty(memberships) && continue
-        for region_id in memberships
+        (var_id < 1 || var_id > length(state.var_regions)) && continue
+        
+        for region_id in state.var_regions[var_id].regions
             push!(state.stale_regions, region_id)
             push!(state.pending_regions, region_id)
         end
@@ -83,16 +72,10 @@ end
     return nothing
 end
 
-@inline function refresh_pending_regions!(
-    problem::TNProblem,
-    config::OptimalBranchingCore.BranchingStrategy,
-    selector::LeastOccurrenceSelector,
-    state::GammaQueueState,
-)
+@inline function refresh_pending_regions!(problem, config, selector, state::GammaQueueState)
     isempty(state.pending_regions) && return nothing
-    # Avoid mutating while iterating by copying ids
-    pending_ids = collect(state.pending_regions)
-    for region_id in pending_ids
+    
+    for region_id in collect(state.pending_regions)  # Copy to avoid mutation during iteration
         ensure_candidate!(problem, config, selector, state, region_id)
     end
     return nothing
@@ -103,6 +86,7 @@ end
     state = ws.branch_queue
     var_num = length(problem.static.vars)
     if !(state isa GammaQueueState) || length(state.var_regions) != var_num
+        # initialize the branch queue
         new_state = GammaQueueState(var_num)
         ws.branch_queue = new_state
         return new_state
@@ -140,42 +124,28 @@ end
 @inline function candidate_valid(candidate::BranchingCandidate, problem::TNProblem)::Bool
     vars = candidate.variables
     sig = candidate.signature
-    length(vars) == length(sig) || return false
+    length(vars) != length(sig) && return false
+    
     @inbounds for (i, var_id) in enumerate(vars)
-        dm = problem.doms[var_id]
-        if dm.bits == 0x00 || dm.bits != sig[i]
-            return false
-        end
+        problem.doms[var_id].bits != sig[i] && return false
     end
     return true
 end
 
-function build_region_for_variable(
-    problem::TNProblem,
-    selector::LeastOccurrenceSelector,
-    var_id::Int,
-)
+function build_region_for_variable(problem::TNProblem, selector::LeastOccurrenceSelector, var_id::Int)
     is_fixed(problem.doms[var_id]) && return nothing
-    return k_neighboring(
-        problem.static,
-        problem.doms,
-        var_id;
-        max_tensors = selector.max_tensors,
-        k = selector.k,
-    )
+    return k_neighboring(problem.static, problem.doms, var_id; 
+                        max_tensors=selector.max_tensors, k=selector.k)
 end
 
-function compute_branching_candidate_for_var(
-    problem::TNProblem,
-    config::OptimalBranchingCore.BranchingStrategy,
-    selector::LeastOccurrenceSelector,
-    var_id::Int,
-)
+function compute_branching_candidate_for_var(problem::TNProblem, config, selector, var_id::Int)
     region = build_region_for_variable(problem, selector, var_id)
-    region === nothing && return nothing
+    isnothing(region) && return nothing
+    
     cache_region!(problem, region)
     variables = vcat(region.boundary_vars, region.inner_vars)
     isempty(variables) && return nothing
+    
     candidate = build_branching_candidate(problem, config, variables, region)
     @debug "candidate_gamma" focus=region.id γ=candidate.result.γ
     return candidate
@@ -204,53 +174,42 @@ function ensure_candidate!(
     state::GammaQueueState,
     var_id::Int,
 )
+    # Check if we can reuse existing candidate
     candidate = get(state.candidates, var_id, nothing)
-    needs_refresh = candidate === nothing || in(var_id, state.stale_regions)
-    if !needs_refresh && candidate !== nothing
-        if candidate_valid(candidate, problem)
-            return candidate
-        else
-            needs_refresh = true
-        end
+    is_stale = var_id ∈ state.stale_regions
+    
+    if !isnothing(candidate) && !is_stale && candidate_valid(candidate, problem)
+        return candidate
     end
-
-    if needs_refresh && candidate !== nothing
-        invalidate_candidate!(state, var_id)
-    end
-
+    
+    # Invalidate old candidate if exists
+    !isnothing(candidate) && invalidate_candidate!(state, var_id)
+    
+    # Compute new candidate
     candidate = compute_branching_candidate_for_var(problem, config, selector, var_id)
-    if candidate === nothing
-        delete!(state.stale_regions, var_id)
-        delete!(state.pending_regions, var_id)
-        return nothing
-    end
-
+    isnothing(candidate) && (delete!(state.stale_regions, var_id); delete!(state.pending_regions, var_id); return nothing)
+    
+    # Register new candidate
     state.candidates[var_id] = candidate
     state.queue[var_id] = candidate.result.γ
     register_candidate_regions!(state, candidate)
     delete!(state.stale_regions, var_id)
     delete!(state.pending_regions, var_id)
+    
     return candidate
 end
 
 function prune_fixed!(state::GammaQueueState, problem::TNProblem)
     for var_id in collect(keys(state.candidates))
-        is_fixed(problem.doms[var_id]) || continue
-        invalidate_candidate!(state, var_id)
+        is_fixed(problem.doms[var_id]) && invalidate_candidate!(state, var_id)
     end
     return nothing
 end
 
-function populate_queue!(
-    problem::TNProblem,
-    config::OptimalBranchingCore.BranchingStrategy,
-    selector::LeastOccurrenceSelector,
-    state::GammaQueueState,
-)
+function populate_queue!(problem, config, selector, state::GammaQueueState)
     for var_id in get_unfixed_vars(problem.doms)
-        if !haskey(state.candidates, var_id) || !haskey(state.queue, var_id)
-            ensure_candidate!(problem, config, selector, state, var_id)
-        end
+        (haskey(state.candidates, var_id) && haskey(state.queue, var_id)) && continue
+        ensure_candidate!(problem, config, selector, state, var_id)
     end
     return nothing
 end
@@ -262,7 +221,7 @@ function select_branching_candidate(
     selector = config.selector
     selector isa LeastOccurrenceSelector || return default_branching_candidate(problem, config)
 
-    state = gamma_queue_state(problem)
+    state = gamma_queue_state(problem)  # GammaQueueState
     prune_fixed!(state, problem)
     refresh_pending_regions!(problem, config, selector, state)
     isempty(state.queue) && populate_queue!(problem, config, selector, state)
@@ -349,70 +308,50 @@ function OptimalBranchingCore.optimal_branching_rule(
     return OptimalBranchingCore.greedymerge(candidates, problem, variables, measure)
 end
 
-function OptimalBranchingCore.apply_branch(
-    problem::TNProblem, 
-    clause::OptimalBranchingCore.Clause{INT}, 
-    variables::Vector{Int}
-) where {INT<:Integer}
+function OptimalBranchingCore.apply_branch(problem::TNProblem, clause, variables::Vector{Int})
+    # Apply clause to fix variables
     new_doms = copy(problem.doms)
     n_fixed = 0
+    
     for i in 1:length(variables)
-        if OptimalBranchingCore.readbit(clause.mask, i) == 1
-            var_id = variables[i]
-            bit_val = OptimalBranchingCore.readbit(clause.val, i)
-            new_val = (bit_val == 1) ? DM_1 : DM_0
-            
-            if !is_fixed(problem.doms[var_id])
-                new_doms[var_id] = new_val
-                n_fixed += 1
-            end
-        end
+        OptimalBranchingCore.readbit(clause.mask, i) != 1 && continue
+        
+        var_id = variables[i]
+        is_fixed(problem.doms[var_id]) && continue
+        
+        bit_val = OptimalBranchingCore.readbit(clause.val, i)
+        new_doms[var_id] = bit_val == 1 ? DM_1 : DM_0
+        n_fixed += 1
     end
     
     @debug "apply_branch: Fixed $n_fixed variables"
-
-    propagated_doms = propagate(problem.static, new_doms)
     
-    if any(dm -> dm.bits == 0x00, propagated_doms)
-        @debug "apply_branch: Contradiction detected during propagation"
-        return (TNProblem(problem.static, fill(DomainMask(0x00), length(propagated_doms)), 0, problem.ws), 0)
-    end
+    # Propagate and check validity
+    propagated_doms = propagate(problem.static, new_doms)
+    any(dm -> dm.bits == 0x00, propagated_doms) && return (create_failed_problem(problem), 0)
     
     new_n_unfixed = count_unfixed(propagated_doms)
-
-    changed_vars = Int[]
-    @inbounds for (idx, dm) in enumerate(propagated_doms)
-        if dm.bits != problem.doms[idx].bits
-            push!(changed_vars, idx)
-        end
-    end
-    
     @debug "apply_branch: n_unfixed: $(problem.n_unfixed) -> $new_n_unfixed"
     
-    if new_n_unfixed > problem.n_unfixed
-        @debug "apply_branch: ERROR - unfixed count increased!"
-        return (TNProblem(problem.static, fill(DomainMask(0x00), length(propagated_doms)), 0, problem.ws), 0)
-    elseif new_n_unfixed == problem.n_unfixed && n_fixed == 0
-        @debug "apply_branch: No progress made (n_unfixed same and n_fixed=0)"
-        return (TNProblem(problem.static, fill(DomainMask(0x00), length(propagated_doms)), 0, problem.ws), 0)
-    end
-
-    new_problem = TNProblem(
-        problem.static,
-        propagated_doms,
-        new_n_unfixed,
-        problem.ws
-    )
+    # Validate progress
+    (new_n_unfixed > problem.n_unfixed || (new_n_unfixed == problem.n_unfixed && n_fixed == 0)) && 
+        return (create_failed_problem(problem), 0)
     
+    # Track changed variables
+    changed_vars = [idx for (idx, dm) in enumerate(propagated_doms) if dm.bits != problem.doms[idx].bits]
+    
+    # Create new problem and update caches
+    new_problem = TNProblem(problem.static, propagated_doms, new_n_unfixed, problem.ws)
     clear_region_cache!(problem)
     
     state = problem.ws.branch_queue
-    if state isa GammaQueueState
-        mark_regions_stale!(state, changed_vars)
-    end
+    state isa GammaQueueState && mark_regions_stale!(state, changed_vars)
     
     return (new_problem, 1)
 end
+
+@inline create_failed_problem(problem::TNProblem) = 
+    TNProblem(problem.static, fill(DomainMask(0x00), length(problem.doms)), 0, problem.ws)
 
 function OptimalBranchingCore.reduce_problem(
     ::Type{T},

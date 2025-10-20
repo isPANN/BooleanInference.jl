@@ -1,5 +1,5 @@
 function contract_region(tn::TNStatic, region::Region, doms::Vector{DomainMask})
-    # @show region.id
+    @debug "contract_region: contracting region $(region.id) with $(length(region.tensors)) tensors"
     # println(union(region.boundary_vars, region.inner_vars))
     n_tensors = length(region.tensors)
     

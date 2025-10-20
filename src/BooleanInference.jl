@@ -29,7 +29,7 @@ include("interface.jl")
 # Export core types
 export Variable, EdgeRef, BoolTensor, TNStatic, DomainMask, TNProblem
 export DM_BOTH, DM_0, DM_1
-export Region, RegionContraction, RegionCacheEntry, RegionCacheState, RegionCache
+export Region, RegionKey, RegionContraction
 export DynamicWorkspace
 
 # Export domain mask functions
@@ -61,8 +61,8 @@ export propagate, get_active_tensors, build_tensor_masks
 export TensorMasks, PropagationBuffers
 
 # Export region management functions
-export cache_region!, get_cached_region_entry, get_cached_region, cache_region_contraction!
-export get_cached_region_contraction, clear_region_cache!, clear_all_region_caches!, set_last_region!
+export cache_region!, get_cached_region, get_cached_contraction, cache_contraction!
+export clear_region_cache!, clear_all_region_caches!, set_last_region!
 
 # Export k-neighboring functions
 export k_neighboring, KNNWorkspace
@@ -72,7 +72,7 @@ export get_unfixed_vars, count_unfixed, bits_to_int
 
 # Export branching table functions
 export separate_fixed_free_boundary, construct_boundary_config, construct_inner_config
-export extract_inner_configs, combine_configs, get_region_contraction, slice_region_contraction
-export handle_no_boundary_case
+export extract_inner_configs, combine_configs, get_region_contraction, get_sliced_contraction
+export slice_region_contraction, handle_no_boundary_case
 
 end
