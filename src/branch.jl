@@ -7,26 +7,107 @@ struct BranchingCandidate
     signature::Vector{UInt8}
 end
 
+mutable struct RegionMembership
+    regions::Set{Int}
+end
+RegionMembership() = RegionMembership(Set{Int}())
+
 mutable struct GammaQueueState
     queue::PriorityQueue{Int,Float64}
     candidates::Dict{Int,BranchingCandidate}
+    var_regions::Vector{RegionMembership}
+    stale_regions::Set{Int}
+    pending_regions::Set{Int}
 end
-GammaQueueState() = GammaQueueState(PriorityQueue{Int,Float64}(), Dict{Int,BranchingCandidate}())
+function GammaQueueState(var_num::Int)
+    memberships = [RegionMembership() for _ in 1:var_num]
+    GammaQueueState(
+        PriorityQueue{Int,Float64}(),
+        Dict{Int,BranchingCandidate}(),
+        memberships,
+        Set{Int}(),
+        Set{Int}(),
+    )
+end
+
+@inline function register_candidate_regions!(
+    state::GammaQueueState,
+    candidate::BranchingCandidate,
+)
+    region = candidate.region
+    region === nothing && return nothing
+    region_id = region.id
+    for var_id in candidate.variables
+        push!(state.var_regions[var_id].regions, region_id)
+    end
+    return nothing
+end
+
+@inline function unregister_candidate_regions!(
+    state::GammaQueueState,
+    candidate::BranchingCandidate,
+)
+    region = candidate.region
+    region === nothing && return nothing
+    region_id = region.id
+    for var_id in candidate.variables
+        delete!(state.var_regions[var_id].regions, region_id)
+    end
+    return nothing
+end
 
 @inline function invalidate_candidate!(state::GammaQueueState, var_id::Int)
-    pop!(state.candidates, var_id, nothing)
+    candidate = pop!(state.candidates, var_id, nothing)
+    if candidate !== nothing
+        unregister_candidate_regions!(state, candidate)
+    end
     haskey(state.queue, var_id) && delete!(state.queue, var_id)
+    delete!(state.stale_regions, var_id)
+    delete!(state.pending_regions, var_id)
+    return nothing
+end
+
+@inline function mark_regions_stale!(state::GammaQueueState, vars::Vector{Int})
+    isempty(vars) && return nothing
+    for var_id in vars
+        if var_id < 1 || var_id > length(state.var_regions)
+            continue
+        end
+        memberships = state.var_regions[var_id].regions
+        isempty(memberships) && continue
+        for region_id in memberships
+            push!(state.stale_regions, region_id)
+            push!(state.pending_regions, region_id)
+        end
+    end
+    return nothing
+end
+
+@inline function refresh_pending_regions!(
+    problem::TNProblem,
+    config::OptimalBranchingCore.BranchingStrategy,
+    selector::LeastOccurrenceSelector,
+    state::GammaQueueState,
+)
+    isempty(state.pending_regions) && return nothing
+    # Avoid mutating while iterating by copying ids
+    pending_ids = collect(state.pending_regions)
+    for region_id in pending_ids
+        ensure_candidate!(problem, config, selector, state, region_id)
+    end
     return nothing
 end
 
 @inline function gamma_queue_state(problem::TNProblem)
     ws = problem.ws
     state = ws.branch_queue
-    if state === nothing
-        state = GammaQueueState()
-        ws.branch_queue = state
+    var_num = length(problem.static.vars)
+    if !(state isa GammaQueueState) || length(state.var_regions) != var_num
+        new_state = GammaQueueState(var_num)
+        ws.branch_queue = new_state
+        return new_state
     end
-    return state::GammaQueueState
+    return state
 end
 
 @inline function dom_signature(problem::TNProblem, vars::Vector{Int})
@@ -124,18 +205,31 @@ function ensure_candidate!(
     var_id::Int,
 )
     candidate = get(state.candidates, var_id, nothing)
-    if candidate !== nothing && candidate_valid(candidate, problem)
-        return candidate
+    needs_refresh = candidate === nothing || in(var_id, state.stale_regions)
+    if !needs_refresh && candidate !== nothing
+        if candidate_valid(candidate, problem)
+            return candidate
+        else
+            needs_refresh = true
+        end
+    end
+
+    if needs_refresh && candidate !== nothing
+        invalidate_candidate!(state, var_id)
     end
 
     candidate = compute_branching_candidate_for_var(problem, config, selector, var_id)
     if candidate === nothing
-        invalidate_candidate!(state, var_id)
+        delete!(state.stale_regions, var_id)
+        delete!(state.pending_regions, var_id)
         return nothing
     end
 
     state.candidates[var_id] = candidate
     state.queue[var_id] = candidate.result.γ
+    register_candidate_regions!(state, candidate)
+    delete!(state.stale_regions, var_id)
+    delete!(state.pending_regions, var_id)
     return candidate
 end
 
@@ -170,6 +264,7 @@ function select_branching_candidate(
 
     state = gamma_queue_state(problem)
     prune_fixed!(state, problem)
+    refresh_pending_regions!(problem, config, selector, state)
     isempty(state.queue) && populate_queue!(problem, config, selector, state)
 
     while !isempty(state.queue)
@@ -284,6 +379,13 @@ function OptimalBranchingCore.apply_branch(
     end
     
     new_n_unfixed = count_unfixed(propagated_doms)
+
+    changed_vars = Int[]
+    @inbounds for (idx, dm) in enumerate(propagated_doms)
+        if dm.bits != problem.doms[idx].bits
+            push!(changed_vars, idx)
+        end
+    end
     
     @debug "apply_branch: n_unfixed: $(problem.n_unfixed) -> $new_n_unfixed"
     
@@ -305,9 +407,8 @@ function OptimalBranchingCore.apply_branch(
     clear_region_cache!(problem)
     
     state = problem.ws.branch_queue
-    if state !== nothing
-        empty!(state.queue)
-        empty!(state.candidates)
+    if state isa GammaQueueState
+        mark_regions_stale!(state, changed_vars)
     end
     
     return (new_problem, 1)
