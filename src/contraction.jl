@@ -27,21 +27,18 @@ function contract_region(tn::TNStatic, region::Region, doms::Vector{DomainMask})
         tensor_indices[i] = remaining_vars
     end
     
-    # Output: only unfixed variables in the region
-    # (fixed variables have already been sliced out)
+    # Output: only unfixed BOUNDARY variables
+    # Inner variables are contracted out (summed over in tropical semiring)
+    # This reduces the dimensionality of the output tensor significantly
     output_vars = Int[]
     
-    # Collect unfixed variables
+    # Only collect unfixed boundary variables
     for var_id in region.boundary_vars
         if !is_fixed(doms[var_id])
             push!(output_vars, var_id)
         end
     end
-    for var_id in region.inner_vars
-        if !is_fixed(doms[var_id])
-            push!(output_vars, var_id)
-        end
-    end
+    # Note: inner_vars are NOT added to output_vars - they will be contracted
     
     if isempty(output_vars)
         # if all variables are fixed, output is scalar

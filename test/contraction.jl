@@ -224,9 +224,11 @@ end
     @test region != nothing
     @test isnothing(get_cached_region_contraction(tn_problem))
 
-    contracted, _ = contract_region(tn_static, region, tn_problem.doms)
+    contracted, output_vars = contract_region(tn_static, region, tn_problem.doms)
     @test contracted != nothing
-    @test length(size(contracted)) == length(region.boundary_vars) + length(region.inner_vars)
+    # After optimization, contract_region only outputs boundary variables (inner vars are contracted out)
+    @test length(size(contracted)) == length(region.boundary_vars)
+    @test length(output_vars) == length(region.boundary_vars)
 
     table = branching_table(tn_problem, TNContractionSolver(), vcat([v for v in region.boundary_vars], [v for v in region.inner_vars]))
     @show vcat([v for v in region.boundary_vars], [v for v in region.inner_vars])

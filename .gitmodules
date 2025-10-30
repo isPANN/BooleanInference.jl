@@ -9,3 +9,6 @@
 [submodule "benchmarks/third-party/abc"]
 	path = benchmarks/third-party/abc
 	url = https://github.com/berkeley-abc/abc.git
+[submodule "benchmarks/third-party/glucose"]
+	path = benchmarks/third-party/glucose
+	url = https://github.com/audemard/glucose.git

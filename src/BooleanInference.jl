@@ -51,7 +51,7 @@ export NumUnfixedVars
 export LeastOccurrenceSelector, AbstractSelector
 
 # Export table solver types
-export TNContractionSolver, AbstractTableSolver
+export TNContractionSolver, TNPropagationSolver, AbstractTableSolver
 
 # Export contraction functions
 export contract_region, contract_tensors, slicing, tensor_unwrapping
@@ -75,7 +75,7 @@ export get_branching_stats, reset_branching_stats!, print_branching_stats
 
 # Export branching table functions
 export separate_fixed_free_boundary, construct_boundary_config, construct_inner_config
-export extract_inner_configs, combine_configs, get_region_contraction, slice_region_contraction
-export handle_no_boundary_case
+export extract_inner_configs, extract_boundary_configs, combine_configs, get_region_contraction, slice_region_contraction
+export handle_no_boundary_case, find_inner_configs
 
 end

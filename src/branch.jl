@@ -35,6 +35,13 @@ function OptimalBranchingCore.branch_and_reduce(
     
     # Step 4: Compute branching table
     tbl = OptimalBranchingCore.branching_table(problem, config.table_solver, variables)
+    
+    # If table is empty, the problem is UNSAT
+    if isempty(tbl.table)
+        @debug "Branching table is empty - problem is UNSAT"
+        return zero(result_type)
+    end
+    
     # Step 5: Compute optimal branching rule
     result = OptimalBranchingCore.optimal_branching_rule(tbl, variables, problem, config.measure, config.set_cover_solver)
 
