@@ -126,13 +126,77 @@ function get_region_contraction(problem::TNProblem, region::Region)
     cached = get_cached_region_contraction(problem; region_id=region.id)
     if isnothing(cached)
         @debug "contract_region_cache_miss" focus=region.id
-        contracted, output_vars = contract_region(problem.static, region, problem.doms)
+        # Cache the contraction with all region variables unfixed
+        # This way the cache can be reused across different domain states
+        region_vars_set = Set(vcat(region.boundary_vars, region.inner_vars))
+        unfixed_doms = copy(problem.doms)
+        for var_id in region_vars_set
+            unfixed_doms[var_id] = DomainMask(0x03)  # Unfix region variables
+        end
+
+        contracted, output_vars = contract_region(problem.static, region, unfixed_doms)
         cache_region_contraction!(problem, contracted, output_vars; region_id=region.id)
-        return contracted, output_vars
+
+        # Now slice the cached tensor according to current doms
+        return slice_cached_contraction(contracted, output_vars, region, problem.doms)
     else
         @debug "contract_region_cache_hit" focus=region.id
-        return cached
+        cached_tensor, cached_vars = cached
+        # Slice the cached tensor according to current doms
+        return slice_cached_contraction(cached_tensor, cached_vars, region, problem.doms)
     end
+end
+
+"""
+    slice_cached_contraction(tensor, output_vars, region, doms)
+
+Slice a cached tensor contraction according to current domain constraints.
+The cached tensor was computed with all region variables unfixed.
+"""
+function slice_cached_contraction(
+    tensor::AbstractArray{Tropical{Float64}},
+    output_vars::Vector{Int},
+    region::Region,
+    doms::Vector{DomainMask}
+)
+    # Build list of variables to fix (those in region that are now fixed in doms)
+    fixed_vars = Tuple{Int,Bool}[]
+    for (i, var_id) in enumerate(output_vars)
+        if is_fixed(doms[var_id])
+            push!(fixed_vars, (var_id, has1(doms[var_id])))
+        end
+    end
+
+    if isempty(fixed_vars)
+        # No variables to fix, return tensor as-is
+        return tensor, output_vars
+    end
+
+    # Build axis map
+    axismap = zeros(Int, maximum(output_vars))
+    for (i, var_id) in enumerate(output_vars)
+        axismap[var_id] = i
+    end
+
+    # Slice the tensor
+    sliced = slice_region_contraction(tensor, fixed_vars, axismap)
+
+    # Update output_vars to only include unfixed variables
+    new_output_vars = Int[]
+    for var_id in output_vars
+        if !is_fixed(doms[var_id])
+            push!(new_output_vars, var_id)
+        end
+    end
+
+    # If all variables are now fixed, the result should be a scalar
+    if isempty(new_output_vars)
+        @assert ndims(sliced) == 0 || length(sliced) == 1
+        scalar_val = ndims(sliced) == 0 ? sliced : sliced[1]
+        return [scalar_val], Int[]
+    end
+
+    return collect(sliced), new_output_vars
 end
 
 function slice_region_contraction(

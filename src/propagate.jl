@@ -119,24 +119,27 @@ end
 # Returns false if no feasible configuration exists.
 @inline function compute_feasible_configs!(feasible::BitVector, allowed_axis::BitVector, working_doms::Vector{DomainMask}, tensor::BoolTensor, masks::TensorMasks)
     n_cfg = length(masks.sat)
-    
+
     # Resize buffers to match this tensor's configuration space
     resize!(feasible, n_cfg)
     resize!(allowed_axis, n_cfg)
-    
+
     # Start with satisfying configurations
     copyto!(feasible, masks.sat)
-    
+
+    # Quick check: if no satisfying configs to start, return early
+    any(feasible) || return false
+
     # Filter by each variable's domain
     @inbounds for (axis, var_id) in enumerate(tensor.var_axes)
         dm = working_doms[var_id]
         dm_bits = dm.bits
-        
+
         # Skip filtering if domain is unrestricted (both 0 and 1 allowed)
         if dm_bits == 0x03  # DM_BOTH
             continue
         end
-        
+
         # Directly intersect with the appropriate mask(s)
         if dm_bits == 0x01  # DM_0: only 0 allowed
             feasible .&= masks.axis_masks0[axis]
@@ -145,11 +148,11 @@ end
         else  # dm_bits == 0x00: contradiction, but shouldn't happen
             return false
         end
-        
+
         # Early exit if no feasible config remains
         any(feasible) || return false
     end
-    
+
     return true
 end
 

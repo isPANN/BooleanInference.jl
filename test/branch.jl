@@ -12,8 +12,8 @@ using TropicalNumbers: Tropical
 # ENV["JULIA_DEBUG"] = "BooleanInference"
 
 @testset "branch" begin
-    fproblem = Factoring(14, 14, 183974111)
-    # fproblem = Factoring(2, 2, 4)
+    fproblem = Factoring(14, 14,183974111)
+    # fproblem = Factoring(8, 8, 211*177)
     circuit_sat = reduceto(CircuitSAT, fproblem)
     problem = CircuitSAT(circuit_sat.circuit.circuit; use_constraints=true)
 
@@ -21,8 +21,9 @@ using TropicalNumbers: Tropical
     tn_static = setup_from_tensor_network(tn)
     tn_problem = TNProblem(tn_static)
     @test !has_last_branch_problem(tn_problem)
-    br_strategy = BranchingStrategy(table_solver = TNContractionSolver(), selector = LeastOccurrenceSelector(1, 2), measure = NumUnfixedVars())
-    @time res = branch_and_reduce(tn_problem, br_strategy, NoReducer(), Tropical{Float64}; show_progress=false)
+    br_strategy = BranchingStrategy(table_solver = TNContractionSolver(), selector = LeastOccurrenceSelector(2, 5), measure = NumUnfixedVars())
+    @time res = BooleanInference.branch_and_reduce(tn_problem, br_strategy, NoReducer(), Tropical{Float64}; show_progress=false)
+    @test res != Tropical(-Inf)
     if res != Tropical(-Inf)
         @test has_last_branch_problem(tn_problem)
         res = last_branch_problem(tn_problem)

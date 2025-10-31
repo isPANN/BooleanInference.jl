@@ -16,14 +16,21 @@ end
 RegionCacheState() = RegionCacheState(Dict{Int, RegionCacheEntry}(), nothing)
 
 struct RegionCache  # a collection of region cache states
+    # Use TNStatic as key instead of TNProblem, so all subproblems share the same cache
     data::IdDict{UInt, RegionCacheState}
 end
 
 const REGION_CACHE = RegionCache(IdDict{UInt, RegionCacheState}())
 
+# Get the cache key for a problem - use TNStatic instead of TNProblem
+@inline function get_cache_key(problem::TNProblem)
+    return objectid(problem.static)
+end
+
 function cache_region!(problem::TNProblem, region::Region)
     # get or create the region cache state for the problem
-    state = get!(REGION_CACHE.data, objectid(problem)) do
+    cache_key = get_cache_key(problem)
+    state = get!(REGION_CACHE.data, cache_key) do
         RegionCacheState()
     end
     state.entries[region.id] = RegionCacheEntry(region)
@@ -32,13 +39,15 @@ function cache_region!(problem::TNProblem, region::Region)
 end
 
 function get_cached_region_entry(problem::TNProblem, region_id::Int)
-    state = get(REGION_CACHE.data, objectid(problem), nothing)
+    cache_key = get_cache_key(problem)
+    state = get(REGION_CACHE.data, cache_key, nothing)
     isnothing(state) && return nothing
     get(state.entries, region_id, nothing)
 end
 function get_cached_region_entry(problem::TNProblem)
     # get the last region id from the state
-    state = get(REGION_CACHE.data, objectid(problem), nothing)
+    cache_key = get_cache_key(problem)
+    state = get(REGION_CACHE.data, cache_key, nothing)
     (isnothing(state) || isnothing(state.last_region_id)) && return nothing
     get(state.entries, state.last_region_id, nothing)
 end
@@ -69,7 +78,9 @@ function get_cached_region_contraction(
 end
 
 function clear_region_cache!(problem::TNProblem)
-    delete!(REGION_CACHE.data, objectid(problem))
+    # Note: With the new caching strategy, we don't clear the cache
+    # because it's shared across all subproblems via problem.static
+    # This function is kept for compatibility but does nothing
     return nothing
 end
 
